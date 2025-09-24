@@ -1,0 +1,37 @@
+[project]
+name = "twitchtool"
+version = "0.1.1"
+description = "Recorder + Encoder Queue + Poller for Twitch using streamlink and ffmpeg"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Your Name" }
+]
+keywords = ["twitch", "streamlink", "ffmpeg", "recorder", "encoder", "x265", "asyncio", "systemd"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: Multimedia :: Video",
+  "Topic :: System :: Monitoring",
+]
+
+dependencies = [
+  'tomli>=2.0.1; python_version < "3.11"',
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+
+[project.scripts]
+twitchtool = "twitchtool.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+python_files = "test_*.py"
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"

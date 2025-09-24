@@ -1,0 +1,32 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+
+# Test cache
+.pytest_cache/
+
+# Editor/IDE folders
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# uv temp files
+.tmp/
+
+# Recording outputs
+*.ts
+*.mp4

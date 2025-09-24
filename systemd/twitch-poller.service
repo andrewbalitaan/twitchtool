@@ -1,0 +1,23 @@
+# ~/.config/systemd/user/twitch-poller.service
+[Unit]
+Description=TwitchTool Poller Daemon
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/twitchtool poller run
+Restart=always
+RestartSec=10
+# Ensure user-level pip/bin is resolvable when poller spawns recorders
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+# We want launched recorders to keep running if poller restarts
+KillMode=process
+# Optional environment overrides:
+# Environment=USERS_FILE=%h/twitch-poller/users.txt
+# Environment=POLL_INTERVAL=300
+# Environment=RECORD_LIMIT=6
+# Environment=QUALITY=best
+# Environment=DOWNLOAD_CMD="twitchtool record"
+
+[Install]
+WantedBy=default.target

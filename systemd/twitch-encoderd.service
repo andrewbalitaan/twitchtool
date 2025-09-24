@@ -1,0 +1,25 @@
+# ~/.config/systemd/user/twitch-encoderd.service
+[Unit]
+Description=TwitchTool Encoder Daemon
+After=default.target
+
+[Service]
+Type=simple
+# Install location for user-level pip: %h/.local/bin
+ExecStart=%h/.local/bin/twitchtool encode-daemon run
+Restart=always
+RestartSec=3
+# Optional environment overrides:
+# Environment=ENCODER_PRESET=fast
+# Environment=ENCODER_CRF=26
+# Environment=ENCODER_THREADS=1
+# Environment=ENCODER_HEIGHT=480
+# Environment=ENCODER_FPS=30
+# Environment=RECORD_LIMIT=6
+# Environment=QUEUE_DIR=%h/twitch-encode-queue
+
+# Keep child ffmpeg managed by this service
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
