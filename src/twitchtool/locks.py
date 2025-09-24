@@ -203,7 +203,9 @@ class GlobalSlotManager:
         return len(self.list_active_owners())
 
     def cleanup_stale_owners(self) -> int:
-        """Remove owner files whose PIDs are not alive. Returns number removed."""
+        """Remove owner files whose PIDs are not alive OR whose slots are not locked.
+        Returns number removed.
+        """
         removed = 0
         for i in range(1, self.record_limit + 1):
             op = self.owner_path(i)
@@ -214,7 +216,7 @@ class GlobalSlotManager:
                 pid = int(d.get("pid", -1))
             except Exception:
                 pid = -1
-            if not is_process_alive(pid):
+            if (not is_process_alive(pid)) or (not self._slot_is_locked(i)):
                 try:
                     op.unlink()
                     removed += 1
