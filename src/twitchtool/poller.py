@@ -38,6 +38,8 @@ class PollerOptions:
     record_limit: int = 6
     logs_dir: Path = Path("~/twitch-logs")
     json_logs: bool = False
+    # If provided, pass through to spawned `twitchtool record` so it reads the same config
+    config_path: Optional[Path] = None
 
 
 STATE_DIR = Path("~/.local/state/twitchtool/poller").expanduser()
@@ -443,6 +445,13 @@ async def poller(opts: PollerOptions) -> int:
                     continue
                 # Build command
                 cmd = base_cmd + [user, "--quality", opts.quality]
+                if opts.config_path:
+                    try:
+                        cfg = str(Path(opts.config_path).expanduser())
+                        cmd += ["--config", cfg]
+                    except Exception:
+                        # If path is unusable, skip passing it through
+                        pass
                 # Log file per user
                 logfile = logs_dir / f"{user}.log"
                 try:

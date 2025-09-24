@@ -57,10 +57,18 @@ def _serialize_toml(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        escaped = value.replace("\\", "\\\\").replace("\"", "\\\"")
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+            .replace("\b", "\\b")
+            .replace("\f", "\\f")
+        )
         return f'"{escaped}"'
     if isinstance(value, list):
-        inner = ", ".join(_serialize_toml(v))
+        inner = ", ".join(_serialize_toml(item) for item in value)
         return f"[{inner}]"
     raise TypeError(f"Unsupported value for TOML serialization: {value!r}")
 
@@ -512,6 +520,7 @@ def main(argv: list[str] | None = None) -> None:
                 record_limit=ns.record_limit or c["limits"]["record_limit"],
                 logs_dir=ns.logs_dir or Path(c["paths"]["logs_dir"]),
                 json_logs=bool(ns.json_logs),
+                config_path=getattr(ns, "config", None),
             )
             rc = asyncio.run(poller(opts))
             sys.exit(rc)

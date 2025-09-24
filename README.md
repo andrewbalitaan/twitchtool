@@ -173,6 +173,10 @@ printf '%s\n' somechannel anotherchannel thirdone > ~/.config/twitchtool/users.t
 twitchtool poller run --users-file ~/.config/twitchtool/users.txt --interval 300
 ```
 
+Recorders launched by the poller automatically inherit the same `--config` path
+you pass to the poller. For example, `twitchtool poller run --config ~/.config/twitchtool/config.toml ...`
+will launch `twitchtool record ... --config ~/.config/twitchtool/config.toml` for each recording.
+
 Manage the poller user list:
 
 ```bash
@@ -276,6 +280,10 @@ probe_concurrency = 10
 ```
 
 **Precedence:** CLI flags > environment variables > config file > internal defaults.
+
+Poller config passthrough: When you start the poller with `--config <path>`, that
+same path is appended to launched `twitchtool record` commands so those recorders
+read the same configuration file.
 
 Helpful env vars:
 
