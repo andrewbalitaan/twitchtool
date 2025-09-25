@@ -71,13 +71,22 @@ def encode_h265(
     dst: Path,
     *,
     height: int,
-    fps: int,
+    fps: str | None,
     crf: int,
     preset: str,
     threads: int,
     loglevel: str,
 ) -> int:
     ffmpeg = which("ffmpeg") or "ffmpeg"
+    vf_filters = [f"scale=-2:{int(height)}"]
+    vsync: list[str] = []
+    fps_val = (str(fps).strip().lower() if fps is not None else "auto")
+    if fps_val and fps_val != "auto":
+        vf_filters.append(f"fps={fps_val}")
+        vsync = ["-vsync", "cfr"]
+
+    ts_fix = ["-fflags", "+genpts"] if src.suffix.lower() == ".ts" else []
+
     cmd = [
         ffmpeg,
         "-hide_banner",
@@ -85,12 +94,11 @@ def encode_h265(
         "-loglevel",
         loglevel,
         "-y",
+        *ts_fix,
         "-i",
         str(src),
         "-vf",
-        f"scale=-2:{int(height)}",
-        "-r",
-        str(int(fps)),
+        ",".join(vf_filters),
         "-c:v",
         "libx265",
         "-crf",
@@ -99,10 +107,15 @@ def encode_h265(
         str(preset),
         "-threads",
         str(int(threads)),
+        *vsync,
         "-c:a",
         "aac",
         "-b:a",
         "128k",
+        "-ar",
+        "48000",
+        "-af",
+        "aresample=async=1:first_pts=0",
         "-movflags",
         "+faststart",
         str(dst),
@@ -115,7 +128,11 @@ def main(argv: List[str]) -> int:
     ap = argparse.ArgumentParser(description="Remux and compress .ts files serially")
     ap.add_argument("inputs", nargs="+", help="One or more .ts files (shell globs OK)")
     ap.add_argument("--height", type=int, default=480, help="Output height (scale=-2:HEIGHT) [default: 480]")
-    ap.add_argument("--fps", type=int, default=30, help="Output FPS [default: 30]")
+    ap.add_argument(
+        "--fps",
+        default="auto",
+        help="Output FPS: 'auto' to preserve source; or a number/fraction like 30000/1001",
+    )
     ap.add_argument("--crf", type=int, default=26, help="x265 CRF [default: 26]")
     ap.add_argument("--preset", default="medium", help="x265 preset [default: medium]")
     ap.add_argument("--threads", type=int, default=1, help="Encoder threads [default: 1]")

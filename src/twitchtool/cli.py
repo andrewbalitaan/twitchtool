@@ -225,7 +225,12 @@ def build_parser() -> argparse.ArgumentParser:
     enc_run.add_argument("--crf", type=int, default=None)
     enc_run.add_argument("--threads", type=int, default=None)
     enc_run.add_argument("--height", type=int, default=None)
-    enc_run.add_argument("--fps", type=int, default=None)
+    enc_run.add_argument(
+        "--fps",
+        type=str,
+        default=None,
+        help="Output FPS: 'auto' to preserve; or a number/fraction like 30000/1001",
+    )
     enc_run.add_argument("--loglevel", default=None)
     enc_run.add_argument("--record-limit", type=int, default=None, help="record limit used to detect downloads (default: 6)")
 
@@ -284,7 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_flags(tc)
     tc.add_argument("inputs", nargs="+", help="one or more .ts file paths or globs")
     tc.add_argument("--height", type=int, default=None)
-    tc.add_argument("--fps", type=int, default=None)
+    tc.add_argument(
+        "--fps",
+        type=str,
+        default="auto",
+        help="Output FPS: 'auto' to preserve; or a number/fraction like 30000/1001",
+    )
     tc.add_argument("--crf", type=int, default=None)
     tc.add_argument("--preset", default=None)
     tc.add_argument("--threads", type=int, default=None)
@@ -411,7 +421,7 @@ def main(argv: list[str] | None = None) -> None:
                 crf=ns.crf or c["encode_daemon"]["crf"],
                 threads=ns.threads or c["encode_daemon"]["threads"],
                 height=ns.height or c["encode_daemon"]["height"],
-                fps=ns.fps or c["encode_daemon"]["fps"],
+                fps=str(ns.fps or c["encode_daemon"]["fps"]).strip() or "auto",
                 loglevel=ns.loglevel or c["encode_daemon"]["loglevel"],
                 json_logs=bool(ns.json_logs),
                 record_limit=ns.record_limit or c["limits"]["record_limit"],
@@ -754,7 +764,7 @@ def main(argv: list[str] | None = None) -> None:
 
         # Resolve defaults from config
         height = ns.height or c["encode_daemon"]["height"]
-        fps = ns.fps or c["encode_daemon"]["fps"]
+        fps = (ns.fps if getattr(ns, "fps", None) is not None else c["encode_daemon"].get("fps", "auto"))
         crf = ns.crf or c["encode_daemon"]["crf"]
         preset = ns.preset or c["encode_daemon"]["preset"]
         threads = ns.threads or c["encode_daemon"]["threads"]
@@ -880,6 +890,15 @@ def main(argv: list[str] | None = None) -> None:
                 _emit("encode-skip-exists", output=str(final_mp4))
                 continue
 
+            # Build filters and options
+            vf_filters = [f"scale=-2:{int(height)}"]
+            vsync = []
+            fps_val = str(fps).strip().lower() if fps is not None else "auto"
+            if fps_val and fps_val != "auto":
+                vf_filters.append(f"fps={fps_val}")
+                vsync = ["-vsync", "cfr"]
+
+            ts_fix = ["-fflags", "+genpts"] if str(use_input).lower().endswith(".ts") else []
             cmd = (
                 build_nice_ionice_prefix()
                 + [
@@ -889,12 +908,11 @@ def main(argv: list[str] | None = None) -> None:
                     "-loglevel",
                     str(loglevel),
                     "-y",
+                    *ts_fix,
                     "-i",
                     str(use_input),
                     "-vf",
-                    f"scale=-2:{int(height)}",
-                    "-r",
-                    str(int(fps)),
+                    ",".join(vf_filters),
                     "-c:v",
                     "libx265",
                     "-crf",
@@ -903,10 +921,15 @@ def main(argv: list[str] | None = None) -> None:
                     str(preset),
                     "-threads",
                     str(int(threads)),
+                    *vsync,
                     "-c:a",
                     "aac",
                     "-b:a",
                     "128k",
+                    "-ar",
+                    "48000",
+                    "-af",
+                    "aresample=async=1:first_pts=0",
                     "-movflags",
                     "+faststart",
                     str(final_mp4),

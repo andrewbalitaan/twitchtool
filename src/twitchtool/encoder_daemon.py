@@ -40,7 +40,8 @@ class EncodeOptions:
     crf: int = 26
     threads: int = 1
     height: int = 480
-    fps: int = 30
+    # fps: "auto" to preserve source; or a number/fraction like "30000/1001"
+    fps: str = "auto"
     loglevel: str = "error"
     json_logs: bool = False
     record_limit: int = 6
@@ -79,6 +80,18 @@ class SingleInstanceLock:
 
 def _build_ffmpeg_cmd(job: JobEntry, opts: EncodeOptions) -> list[str]:
     ffmpeg = which("ffmpeg") or "ffmpeg"
+    # Build video filtergraph with optional fps= and vsync cfr
+    vf_filters: list[str] = [f"scale=-2:{int(opts.height)}"]
+    vsync: list[str] = []
+    fps_val = str(opts.fps).strip().lower() if opts.fps is not None else "auto"
+    if fps_val and fps_val != "auto":
+        vf_filters.append(f"fps={fps_val}")
+        vsync = ["-vsync", "cfr"]
+
+    # Add +genpts before -i when input is TS to stabilize timestamps
+    in_suffix = Path(job.job.input).suffix.lower()
+    ts_fix = ["-fflags", "+genpts"] if in_suffix == ".ts" else []
+
     cmd = [
         ffmpeg,
         "-hide_banner",
@@ -86,24 +99,28 @@ def _build_ffmpeg_cmd(job: JobEntry, opts: EncodeOptions) -> list[str]:
         "-loglevel",
         opts.loglevel,
         "-y",
+        *ts_fix,
         "-i",
         job.job.input,
         "-vf",
-        f"scale=-2:{opts.height}",
-        "-r",
-        str(opts.fps),
+        ",".join(vf_filters),
         "-c:v",
         "libx265",
         "-crf",
-        str(opts.crf),
+        str(int(opts.crf)),
         "-preset",
-        opts.preset,
+        str(opts.preset),
         "-threads",
-        str(opts.threads),
+        str(int(opts.threads)),
+        *vsync,
         "-c:a",
         "aac",
         "-b:a",
         "128k",
+        "-ar",
+        "48000",
+        "-af",
+        "aresample=async=1:first_pts=0",
         "-movflags",
         "+faststart",
         job.job.output,
@@ -281,12 +298,12 @@ def encode_daemon(opts: EncodeOptions) -> int:
     def _clamp(n: int, lo: int, hi: int) -> int:
         return max(lo, min(hi, n))
 
-    original = (opts.crf, opts.threads, opts.height, opts.fps)
+    original = (opts.crf, opts.threads, opts.height, str(opts.fps))
     opts.crf = _clamp(int(opts.crf), 0, 51)
     opts.threads = _clamp(int(opts.threads), 1, 64)
     opts.height = _clamp(int(opts.height), 144, 4320)
-    opts.fps = _clamp(int(opts.fps), 1, 120)
-    if (opts.crf, opts.threads, opts.height, opts.fps) != original:
+    # fps may be 'auto' or a fraction; leave as-is
+    if (opts.crf, opts.threads, opts.height, str(opts.fps)) != original:
         logger.warning(
             "sanitized encode options",
             extra={
@@ -294,7 +311,7 @@ def encode_daemon(opts: EncodeOptions) -> int:
                     "crf": opts.crf,
                     "threads": opts.threads,
                     "height": opts.height,
-                    "fps": opts.fps,
+                    "fps": str(opts.fps),
                 }
             },
         )

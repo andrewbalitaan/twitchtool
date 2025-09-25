@@ -78,7 +78,8 @@ DEFAULTS: Dict[str, Any] = {
         "crf": 26,
         "threads": 1,
         "height": 480,
-        "fps": 30,
+        # 'auto' preserves source FPS; or set a number/fraction like '30000/1001'
+        "fps": "auto",
         "loglevel": "error",
     },
     "poller": {
@@ -168,12 +169,14 @@ def apply_env(cfg: Dict[str, Any]) -> Dict[str, Any]:
     ]:
         v = _env_str(env, None)
         if v is not None:
-            # ints where needed
-            if key in {"crf", "threads", "height", "fps"}:
+            if key in {"crf", "threads", "height"}:
                 try:
                     e[key] = int(v)
                 except ValueError:
                     pass
+            elif key == "fps":
+                # accept 'auto' or fraction/numeric strings
+                e[key] = v
             else:
                 e[key] = v
 

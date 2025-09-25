@@ -484,10 +484,10 @@ ffmpeg -i input -vf "scale=-2:480" -r 30 -c:v libx265 -crf 26 -preset medium -th
 ## Commands
 
 - `twitchtool record <username> [--quality best] [--retry-delay 60] [--retry-window 900] [--loglevel error] [--output-dir DIR] [--queue-dir DIR] [--record-limit 6] [--delete-ts-after-remux|--no-delete-ts-after-remux] [--delete-input-on-success|--no-delete-input-on-success] [--fail-fast]`
-- `twitchtool encode-daemon run [--queue-dir DIR] [--preset medium] [--crf 26] [--threads 1] [--height 480] [--fps 30] [--loglevel error] [--record-limit 6]`
+- `twitchtool encode-daemon run [--queue-dir DIR] [--preset medium] [--crf 26] [--threads 1] [--height 480] [--fps auto] [--loglevel error] [--record-limit 6]`
 - `twitchtool encode-daemon stop [--timeout 10] [--force]`
 - `twitchtool encode-daemon status`
-- `twitchtool tscompress [--height 480] [--fps 30] [--crf 26] [--preset medium] [--threads 1] [--loglevel error] [--delete-ts-after-remux] [--overwrite] [--delete-input-on-success] <.ts ...>`
+- `twitchtool tscompress [--height 480] [--fps auto] [--crf 26] [--preset medium] [--threads 1] [--loglevel error] [--delete-ts-after-remux] [--overwrite] [--delete-input-on-success] <.ts ...>`
 - `twitchtool encode-mode on|off|status`
 - `twitchtool help [command]`
 - `twitchtool poller run [--users-file ~/.config/twitchtool/users.txt] [--interval 300] [--quality best] [--download-cmd 'twitchtool record'] [--timeout 15] [--probe-concurrency 10] [--record-limit 6] [--logs-dir DIR]`
