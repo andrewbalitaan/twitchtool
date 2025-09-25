@@ -15,7 +15,7 @@ Options mirror encoder defaults; see --help.
 Notes:
   - Processes inputs one-by-one (serial).
   - Skips encoding if the final output exists unless --overwrite is given.
-  - By default, deletes the .ts after successful remux; use --keep-ts to retain it.
+  - By default, keeps the .ts after successful remux; use --delete-ts-after-remux to remove it.
   - Requires ffmpeg in PATH.
 """
 
@@ -120,7 +120,12 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--preset", default="medium", help="x265 preset [default: medium]")
     ap.add_argument("--threads", type=int, default=1, help="Encoder threads [default: 1]")
     ap.add_argument("--loglevel", default="error", help="ffmpeg loglevel [default: error]")
-    ap.add_argument("--keep-ts", action="store_true", help="Keep .ts after successful remux (default: delete)")
+    ap.add_argument("--keep-ts", action="store_true", default=None, help="Keep .ts after successful remux (default)")
+    ap.add_argument(
+        "--delete-ts-after-remux",
+        action="store_true",
+        help="Delete .ts after successful remux",
+    )
     ap.add_argument(
         "--overwrite",
         action="store_true",
@@ -195,7 +200,9 @@ def main(argv: List[str]) -> int:
                 if rrc == 0 and remux_mp4.exists() and remux_mp4.stat().st_size > 0:
                     print(f"[ok] remuxed -> {remux_mp4.name}")
                     use_input = remux_mp4
-                    if not args.keep_ts:
+                    # Default: keep TS unless explicitly asked to delete
+                    delete_ts = bool(args.delete_ts_after_remux) and not bool(args.keep_ts)
+                    if delete_ts:
                         try:
                             in_path.unlink()
                             print(f"[info] deleted TS: {in_path.name}")
@@ -241,4 +248,3 @@ def main(argv: List[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

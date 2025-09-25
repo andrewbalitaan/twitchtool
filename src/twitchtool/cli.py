@@ -289,7 +289,8 @@ def build_parser() -> argparse.ArgumentParser:
     tc.add_argument("--preset", default=None)
     tc.add_argument("--threads", type=int, default=None)
     tc.add_argument("--loglevel", default=None)
-    tc.add_argument("--keep-ts", action="store_true", default=None, help="keep .ts after successful remux")
+    tc.add_argument("--keep-ts", action="store_true", default=None, help="keep .ts after successful remux (default)")
+    tc.add_argument("--delete-ts-after-remux", action="store_true", help="delete .ts after successful remux")
     tc.add_argument("--overwrite", action="store_true", help="overwrite existing outputs if present")
     tc.add_argument(
         "--delete-input-on-success",
@@ -764,9 +765,13 @@ def main(argv: list[str] | None = None) -> None:
             else bool(ns.delete_input_on_success)
         )
         # keep-ts flag maps inversely to delete_ts_after_remux
-        delete_ts_after_remux = (
-            c["record"]["delete_ts_after_remux"] if ns.keep_ts is None else (not bool(ns.keep_ts))
-        )
+        # Default: keep TS by default; allow explicit delete via flag.
+        if getattr(ns, "keep_ts", None):
+            delete_ts_after_remux = False
+        elif getattr(ns, "delete_ts_after_remux", False):
+            delete_ts_after_remux = True
+        else:
+            delete_ts_after_remux = False
 
         from .utils import which, build_nice_ionice_prefix
         import glob
