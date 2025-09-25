@@ -25,6 +25,7 @@ from .utils import (
     which,
     atomic_write_json,
 )
+from .config import DEFAULTS
 
 
 @dataclass
@@ -36,7 +37,7 @@ class PollerOptions:
     timeout: int = 15
     probe_concurrency: int = 10
     record_limit: int = 6
-    logs_dir: Path = Path("~/twitch-logs")
+    logs_dir: Path = Path(DEFAULTS["paths"]["logs_dir"])  # Align with config default
     json_logs: bool = False
     # If provided, pass through to spawned `twitchtool record` so it reads the same config
     config_path: Optional[Path] = None

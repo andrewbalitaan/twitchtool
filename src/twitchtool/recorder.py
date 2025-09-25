@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from .locks import GlobalSlotManager, PerUserLock, SlotUnavailable, UserAlreadyRecording
+from .config import DEFAULTS
 from .queue import Job, write_job
 from .utils import (
     ISO,
@@ -33,8 +34,8 @@ class RecordOptions:
     retry_delay: int = 60
     retry_window: int = 900
     loglevel: str = "error"
-    output_dir: Path = Path(".")
-    queue_dir: Path = Path("~/twitch-encode-queue")
+    output_dir: Path = Path(DEFAULTS["paths"]["record_dir"])  # Align with config default
+    queue_dir: Path = Path(DEFAULTS["paths"]["queue_dir"])    # Align with config default
     enable_remux: bool = True
     delete_ts_after_remux: bool = True
     delete_input_on_success: bool = False

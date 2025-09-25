@@ -279,6 +279,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     poller_sub.add_parser("status", help="show poller status")
 
+    # tscompress (batch remux + encode for existing .ts files)
+    tc = sub.add_parser("tscompress", help="remux and compress .ts files serially")
+    _add_common_flags(tc)
+    tc.add_argument("inputs", nargs="+", help="one or more .ts file paths or globs")
+    tc.add_argument("--height", type=int, default=None)
+    tc.add_argument("--fps", type=int, default=None)
+    tc.add_argument("--crf", type=int, default=None)
+    tc.add_argument("--preset", default=None)
+    tc.add_argument("--threads", type=int, default=None)
+    tc.add_argument("--loglevel", default=None)
+    tc.add_argument("--keep-ts", action="store_true", default=None, help="keep .ts after successful remux")
+    tc.add_argument("--overwrite", action="store_true", help="overwrite existing outputs if present")
+    tc.add_argument(
+        "--delete-input-on-success",
+        action="store_true",
+        default=None,
+        help="delete the input used for encode after success",
+    )
+
     # doctor
     dp = sub.add_parser("doctor", help="check environment")
     _add_common_flags(dp)
@@ -715,6 +734,194 @@ def main(argv: list[str] | None = None) -> None:
         report = gather_status(queue_dir, record_limit)
         print_report(report)
         sys.exit(0)
+
+    elif ns.cmd == "tscompress":
+        c = cfg
+
+        def _emit(event: str, **extra: object) -> None:
+            if ns.json_logs:
+                payload: dict[str, object] = {"event": event}
+                if extra:
+                    payload.update(extra)
+                print(json.dumps(payload))
+            else:
+                if extra:
+                    details = " ".join(f"{k}={extra[k]}" for k in sorted(extra))
+                    print(f"{event}: {details}")
+                else:
+                    print(event)
+
+        # Resolve defaults from config
+        height = ns.height or c["encode_daemon"]["height"]
+        fps = ns.fps or c["encode_daemon"]["fps"]
+        crf = ns.crf or c["encode_daemon"]["crf"]
+        preset = ns.preset or c["encode_daemon"]["preset"]
+        threads = ns.threads or c["encode_daemon"]["threads"]
+        loglevel = ns.loglevel or c["encode_daemon"]["loglevel"]
+        delete_input_on_success = (
+            c["record"]["delete_input_on_success"]
+            if ns.delete_input_on_success is None
+            else bool(ns.delete_input_on_success)
+        )
+        # keep-ts flag maps inversely to delete_ts_after_remux
+        delete_ts_after_remux = (
+            c["record"]["delete_ts_after_remux"] if ns.keep_ts is None else (not bool(ns.keep_ts))
+        )
+
+        from .utils import which, build_nice_ionice_prefix
+        import glob
+        import subprocess
+        from pathlib import Path as _Path
+
+        if not which("ffmpeg"):
+            _emit("ffmpeg-missing")
+            sys.exit(2)
+
+        # Expand inputs (support shell-expanded and literal globs)
+        patterns: list[str] = list(getattr(ns, "inputs", []) or [])
+        files: list[_Path] = []
+        for pat in patterns:
+            p = _Path(pat)
+            if p.exists():
+                files.append(p)
+                continue
+            matched = [
+                _Path(x) for x in glob.glob(pat)
+            ]
+            if matched:
+                files.extend(matched)
+            else:
+                _emit("no-match", pattern=pat)
+
+        # De-duplicate by real path, keep order
+        seen: set[_Path] = set()
+        ordered: list[_Path] = []
+        for f in files:
+            try:
+                rp = f.resolve()
+            except FileNotFoundError:
+                rp = f
+            if rp not in seen:
+                seen.add(rp)
+                ordered.append(f)
+
+        if not ordered:
+            _emit("no-inputs")
+            sys.exit(1)
+
+        def _run(cmd: list[str]) -> int:
+            try:
+                proc = subprocess.Popen(cmd)
+            except OSError as e:
+                _emit("spawn-failed", error=str(e))
+                return 1
+            return proc.wait()
+
+        rc_overall = 0
+        for ip in ordered:
+            ip = ip.resolve()
+            if ip.suffix.lower() != ".ts":
+                _emit("skip-non-ts", path=str(ip))
+                rc_overall = rc_overall or 1
+                continue
+
+            base = ip.with_suffix("").name
+            out_dir = ip.parent
+            remux_mp4 = out_dir / f"{base}.mp4"
+            final_mp4 = out_dir / f"{base}_compressed.mp4"
+
+            _emit("begin", input=str(ip))
+
+            # Remux
+            do_remux = bool(ns.overwrite) or not (remux_mp4.exists() and remux_mp4.stat().st_size > 0)
+            use_input = ip
+            if do_remux:
+                cmd = [
+                    which("ffmpeg") or "ffmpeg",
+                    "-hide_banner",
+                    "-nostdin",
+                    "-i",
+                    str(ip),
+                    "-c",
+                    "copy",
+                    "-bsf:a",
+                    "aac_adtstoasc",
+                    "-movflags",
+                    "+faststart",
+                    "-loglevel",
+                    str(loglevel),
+                    "-y",
+                    str(remux_mp4),
+                ]
+                _emit("remux-start", cmd=" ".join(cmd))
+                rrc = _run(cmd)
+                if rrc == 0 and remux_mp4.exists() and remux_mp4.stat().st_size > 0:
+                    _emit("remux-ok", output=str(remux_mp4))
+                    use_input = remux_mp4
+                    if delete_ts_after_remux:
+                        try:
+                            ip.unlink()
+                            _emit("ts-deleted", path=str(ip))
+                        except Exception as e:
+                            _emit("ts-delete-failed", path=str(ip), error=str(e))
+                else:
+                    _emit("remux-failed", rc=rrc)
+            else:
+                _emit("remux-skip-exists", output=str(remux_mp4))
+                use_input = remux_mp4 if remux_mp4.exists() else ip
+
+            # Encode
+            if final_mp4.exists() and final_mp4.stat().st_size > 0 and not bool(ns.overwrite):
+                _emit("encode-skip-exists", output=str(final_mp4))
+                continue
+
+            cmd = (
+                build_nice_ionice_prefix()
+                + [
+                    which("ffmpeg") or "ffmpeg",
+                    "-hide_banner",
+                    "-nostdin",
+                    "-loglevel",
+                    str(loglevel),
+                    "-y",
+                    "-i",
+                    str(use_input),
+                    "-vf",
+                    f"scale=-2:{int(height)}",
+                    "-r",
+                    str(int(fps)),
+                    "-c:v",
+                    "libx265",
+                    "-crf",
+                    str(int(crf)),
+                    "-preset",
+                    str(preset),
+                    "-threads",
+                    str(int(threads)),
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    "-movflags",
+                    "+faststart",
+                    str(final_mp4),
+                ]
+            )
+            _emit("encode-start", cmd=" ".join(cmd))
+            erc = _run(cmd)
+            if erc == 0 and final_mp4.exists() and final_mp4.stat().st_size > 0:
+                _emit("encode-ok", output=str(final_mp4))
+                if delete_input_on_success:
+                    try:
+                        use_input.unlink()
+                        _emit("input-deleted", path=str(use_input))
+                    except Exception as e:
+                        _emit("input-delete-failed", path=str(use_input), error=str(e))
+            else:
+                _emit("encode-failed", rc=erc, input=str(ip))
+                rc_overall = rc_overall or (erc or 1)
+
+        sys.exit(rc_overall)
 
     elif ns.cmd == "users":
         c = cfg

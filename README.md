@@ -227,6 +227,37 @@ Check your environment:
 twitchtool doctor
 ```
 
+## Batch remux + compress existing .ts files
+
+If you have existing `.ts` recordings and want to remux and compress them serially without the queue/daemon, use the helper script in this repo:
+
+```bash
+python3 scripts/remux_compress_serial.py ~/Downloads/TwitchTool/*.ts
+```
+
+Or run it via the CLI (installed as part of twitchtool):
+
+```bash
+twitchtool tscompress ~/Downloads/TwitchTool/*.ts
+```
+
+Notes:
+- Requires `ffmpeg` in PATH.
+- Processes inputs one-by-one (serial).
+- Produces `<basename>.mp4` (remux) and `<basename>_compressed.mp4` (x265).
+- Deletes the merged `.ts` after a successful remux by default; add `--keep-ts` to retain it.
+- Skips existing outputs unless you pass `--overwrite`.
+- Encoding parameters match the encoder daemon defaults: `scale=-2:HEIGHT`, `fps`, `CRF`, `preset`, `threads`, AAC 128k, `+faststart`.
+
+Common options:
+
+```bash
+python3 scripts/remux_compress_serial.py \
+  --height 480 --fps 30 --crf 26 --preset medium --threads 1 \
+  --loglevel error --keep-ts --overwrite --delete-input-on-success \
+  /path/to/*.ts
+```
+
 ---
 
 ## Configuration
@@ -456,6 +487,7 @@ ffmpeg -i input -vf "scale=-2:480" -r 30 -c:v libx265 -crf 26 -preset medium -th
 - `twitchtool encode-daemon run [--queue-dir DIR] [--preset medium] [--crf 26] [--threads 1] [--height 480] [--fps 30] [--loglevel error] [--record-limit 6]`
 - `twitchtool encode-daemon stop [--timeout 10] [--force]`
 - `twitchtool encode-daemon status`
+- `twitchtool tscompress [--height 480] [--fps 30] [--crf 26] [--preset medium] [--threads 1] [--loglevel error] [--keep-ts] [--overwrite] [--delete-input-on-success] <.ts ...>`
 - `twitchtool encode-mode on|off|status`
 - `twitchtool help [command]`
 - `twitchtool poller run [--users-file ~/.config/twitchtool/users.txt] [--interval 300] [--quality best] [--download-cmd 'twitchtool record'] [--timeout 15] [--probe-concurrency 10] [--record-limit 6] [--logs-dir DIR]`
