@@ -153,6 +153,8 @@ def record(opts: RecordOptions) -> int:
 
     out_dir = abspath(opts.output_dir)
     ensure_dir(out_dir)
+    # Write all in-progress artifacts to a temp subdirectory, then move final outputs
+    temp_dir = ensure_dir(out_dir / "temp")
     # Low-space warning
     try:
         import shutil
@@ -203,7 +205,7 @@ def record(opts: RecordOptions) -> int:
             # If user requested stop before any data, just exit
             break
 
-        part = out_dir / f"{base}_part{part_idx:02d}.ts"
+        part = temp_dir / f"{base}_part{part_idx:02d}.ts"
         cmd = _streamlink_cmd(opts.username, opts.quality, part, opts.loglevel)
         logger.info("start part", extra={"extra": {"part": part.name, "cmd": " ".join(shlex.quote(c) for c in cmd)}})
         try:
@@ -258,7 +260,7 @@ def record(opts: RecordOptions) -> int:
             continue
 
     # Merge if any parts
-    merged_ts = out_dir / f"{base}.ts"
+    merged_ts = temp_dir / f"{base}.ts"
     if not parts:
         logger.warning("no parts captured; exiting without outputs")
         gsm.release_slot()
@@ -287,16 +289,24 @@ def record(opts: RecordOptions) -> int:
     gsm.release_slot()
 
     if not bool(opts.enable_remux):
+        # Move merged TS to final directory before exiting
+        final_ts = out_dir / merged_ts.name
+        try:
+            merged_ts.replace(final_ts)
+            logger.info("finalized output", extra={"extra": {"moved_to": final_ts.name}})
+        except Exception as e:
+            logger.error("failed to move final TS", extra={"extra": {"error": str(e), "src": str(merged_ts), "dst": str(final_ts)}})
+            final_ts = merged_ts  # fallback: keep in temp
         logger.info(
             "remux disabled; leaving merged TS and skipping encode queue",
-            extra={"extra": {"output": merged_ts.name}},
+            extra={"extra": {"output": final_ts.name}},
         )
         user_lock.release()
         logger.info("recorder done")
         return 0
 
     # Try remux
-    remux_mp4 = out_dir / f"{base}.mp4"
+    remux_mp4 = temp_dir / f"{base}.mp4"
     remux_rc = _ffmpeg_remux_to_mp4(merged_ts, remux_mp4, opts.loglevel)
     use_input = merged_ts
     if remux_rc == 0 and remux_mp4.exists() and remux_mp4.stat().st_size > 0:
@@ -310,10 +320,28 @@ def record(opts: RecordOptions) -> int:
     else:
         logger.warning("remux failed, keeping TS for encode", extra={"extra": {"rc": remux_rc}})
 
+    # Move final input(s) from temp to the configured output directory
+    moved_input = out_dir / use_input.name
+    try:
+        use_input.replace(moved_input)
+        logger.info("finalized input for encode", extra={"extra": {"moved_to": moved_input.name}})
+    except Exception as e:
+        logger.error("failed to move input to final directory", extra={"extra": {"error": str(e), "src": str(use_input), "dst": str(moved_input)}})
+        moved_input = use_input  # fallback: encode from temp
+
+    # If we kept the TS alongside a successful remux, also move it to final dir
+    if use_input == remux_mp4 and merged_ts.exists() and not opts.delete_ts_after_remux:
+        ts_final = out_dir / merged_ts.name
+        try:
+            merged_ts.replace(ts_final)
+            logger.info("kept TS alongside MP4", extra={"extra": {"moved_to": ts_final.name}})
+        except Exception as e:
+            logger.error("failed to move TS to final directory", extra={"extra": {"error": str(e), "src": str(merged_ts), "dst": str(ts_final)}})
+
     # Enqueue encode job
     final_out = out_dir / f"{base}_compressed.mp4"
     job = Job(
-        input=str(use_input.resolve()),
+        input=str(moved_input.resolve()),
         output=str(final_out.resolve()),
         loglevel=opts.loglevel,
         delete_input_on_success=bool(opts.delete_input_on_success),

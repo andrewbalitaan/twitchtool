@@ -144,10 +144,10 @@ Add `--no-remux` if you want to keep the merged `.ts` as-is and skip the encode 
 This will:
 
 1. Acquire a **per-user lock** (`/tmp/twitch-active-users/somechannel.lock`) and a **global slot** (1..N).
-2. Capture `.ts` parts (resilient reconnects).
-3. Merge parts into `somechannel_YYYY-MM-DD_HH-MM.ts` in `~/Downloads` (unless `--output-dir` is given).
-4. Attempt remux to `somechannel_YYYY-MM-DD_HH-MM.mp4` (stream copy, faststart).
-5. Enqueue an encode job to `~/.local/state/twitchtool/encode-queue/jobs`.
+2. Capture `.ts` parts (resilient reconnects) under `<output_dir>/temp/`.
+3. Merge parts to `<base>.ts` in `temp/`, then finalize outputs by moving them into `<output_dir>`.
+4. Attempt remux to `<base>.mp4` (stream copy, +faststart). On success, the finalized `.mp4` appears in `<output_dir>`; on failure, the merged `.ts` is kept and moved there.
+5. Enqueue an encode job to `~/.local/state/twitchtool/encode-queue/jobs` targeting the finalized file in `<output_dir>`.
 6. Release the global slot at **merge time** (not after remux/queue) to maximize capacity.
 
 Run the encoder daemon:
@@ -226,6 +226,15 @@ Check your environment:
 ```bash
 twitchtool doctor
 ```
+
+### In-progress temp directory
+
+- While recording, all in-progress files live under a `temp/` subfolder inside your configured recordings folder (e.g., `~/Downloads/TwitchTool/temp`).
+- Final deliverables are moved atomically into the recordings folder once ready:
+  - Remux disabled/failed: the merged `<base>.ts` is moved to `<output_dir>`.
+  - Remux succeeded: the `<base>.mp4` (and, if configured to keep it, `<base>.ts`) is moved to `<output_dir>`.
+- The encode queue always references the finalized path in `<output_dir>`, avoiding partial files.
+- If a run is interrupted (power loss, kill -9), you may see leftovers in `temp/`. After confirming no recorder is running (`twitchtool status`), you can safely remove stale files from `temp/`.
 
 ## Batch remux + compress existing .ts files
 
@@ -436,6 +445,11 @@ Change the cap by setting `RECORD_LIMIT` or `[limits].record_limit` (and restart
 - The encoder can **optionally delete the input** after success (`delete_input_on_success = true`).
 - Queue directory: `~/.local/state/twitchtool/encode-queue/jobs`. Keep an eye on free space:
   - `twitchtool doctor` reports disk usage.
+
+- Temp directory hygiene:
+  - While a recording is in progress, working files live under `<output_dir>/temp` (e.g., `~/Downloads/TwitchTool/temp`).
+  - Final files are moved atomically into `<output_dir>` when ready, so partials shouldn’t appear outside `temp/`.
+  - If a machine crash or kill -9 leaves files behind, verify no recorder is running (`twitchtool status`) and then remove stale files from `temp/` safely.
 
 ### Outputs and file retention
 

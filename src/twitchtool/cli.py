@@ -15,6 +15,7 @@ try:
 except Exception:  # pragma: no cover
     import tomli as tomllib  # type: ignore[no-redef]
 from pathlib import Path
+import re
 
 from . import __version__
 from .config import DEFAULT_CONFIG_PATH, effective_config
@@ -129,6 +130,74 @@ def _write_raw_config(path: Path, data: Dict[str, Any]) -> None:
     path.write_text(toml_text, encoding="utf-8")
 
 
+def _set_enable_remux_in_config_text(text: str, desired: bool) -> tuple[str, bool]:
+    """Return (new_text, changed) with only record.enable_remux toggled.
+
+    - If a [record] table exists, update or insert enable_remux there.
+    - Else, if a one-line inline table exists (record = {...}), update/insert it.
+    - Else, append a [record] section with enable_remux.
+
+    Attempts to preserve layout and comments where practical.
+    """
+    value = "true" if desired else "false"
+
+    # 1) [record] explicit table
+    table_pat = re.compile(r"^\s*\[record\]\s*$", re.MULTILINE)
+    m = table_pat.search(text)
+    if m:
+        start = m.end()
+        # Find end of table (next [section])
+        next_table = re.search(r"^\s*\[[^\]\n]+\]\s*$", text[start:], re.MULTILINE)
+        end = start + next_table.start() if next_table else len(text)
+        block = text[start:end]
+        # Replace existing enable_remux line if present
+        line_pat = re.compile(r"^(?P<prefix>\s*enable_remux\s*=\s*)(?P<val>[^#\r\n]+)(?P<suffix>\s*(#.*)?)$", re.MULTILINE)
+        if line_pat.search(block):
+            new_block, n = line_pat.subn(lambda mo: f"{mo.group('prefix')}{value}{mo.group('suffix')}", block)
+            if n:
+                return text[:start] + new_block + text[end:], True
+        # Otherwise insert after header or at end of block
+        insertion = f"\nenable_remux = {value}\n"
+        # If block starts with a newline already, just append at start
+        new_block = insertion + block
+        return text[:start] + new_block + text[end:], True
+
+    # 2) One-line inline table: record = { ... }
+    inline_pat = re.compile(r"^(?P<prefix>\s*record\s*=\s*\{)(?P<body>[^}]*)\}(?P<suffix>\s*(#.*)?)$", re.MULTILINE)
+    m2 = inline_pat.search(text)
+    if m2:
+        body = m2.group('body')
+        # Check if enable_remux present
+        kv_pat = re.compile(r"(\benable_remux\s*=\s*)([^,}]+)")
+        if kv_pat.search(body):
+            new_body, n = kv_pat.subn(lambda mo: f"{mo.group(1)}{value}", body)
+            if n:
+                return text[:m2.start()] + f"{m2.group('prefix')}{new_body}}}{m2.group('suffix')}" + text[m2.end():], True
+        # Insert at beginning of body
+        new_body = (" " if body.strip() else " ") + f"enable_remux = {value}" + (", " + body.lstrip() if body.strip() else " ")
+        # Normalize spacing: avoid trailing space before closing brace
+        new_line = f"{m2.group('prefix')}{new_body.strip()}}}{m2.group('suffix')}"
+        return text[:m2.start()] + new_line + text[m2.end():], True
+
+    # 3) Append a new table at end
+    sep = "" if text.endswith("\n") or text == "" else "\n"
+    new_text = f"{text}{sep}\n[record]\nenable_remux = {value}\n"
+    return new_text, True
+
+
+def _set_enable_remux_in_config(path: Path, desired: bool) -> None:
+    """Update only record.enable_remux in the TOML file, preserving comments."""
+    path = path.expanduser()
+    try:
+        original = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        original = ""
+    new_text, changed = _set_enable_remux_in_config_text(original, desired)
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_text, encoding="utf-8")
+
+
 def _add_common_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--json-logs", action="store_true", help="emit JSON log lines instead of human-readable")
     p.add_argument("--config", type=Path, default=None, help="path to config.toml (default: ~/.config/twitchtool/config.toml)")
@@ -154,7 +223,12 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--retry-window", type=int, default=None, help="keep trying this many seconds after a cut (default: 900)")
     rp.add_argument("--loglevel", default=None, help="ffmpeg/streamlink loglevel (default: error)")
     rp.add_argument("--output-dir", type=Path, default=None, help="directory for outputs (default: ~/Downloads)")
-    rp.add_argument("--queue-dir", type=Path, default=None, help="encode queue base dir (default: ~/twitch-encode-queue)")
+    rp.add_argument(
+        "--queue-dir",
+        type=Path,
+        default=None,
+        help="encode queue base dir (default: ~/.local/state/twitchtool/encode-queue)",
+    )
     rp.add_argument("--remux", dest="enable_remux", action="store_true", default=None, help="enable remuxing (default: on)")
     rp.add_argument("--no-remux", dest="enable_remux", action="store_false", help="skip remux and skip encode queue")
     rp.add_argument("--delete-ts-after-remux", action="store_true", default=None, help="delete .ts when remux succeeds")
@@ -292,7 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
     tc.add_argument(
         "--fps",
         type=str,
-        default="auto",
+        default=None,
         help="Output FPS: 'auto' to preserve; or a number/fraction like 30000/1001",
     )
     tc.add_argument("--crf", type=int, default=None)
@@ -493,32 +567,16 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(0)
 
         desired = True if ns.encode_mode_cmd == "on" else False
-        data = _load_raw_config(cfg_path)
-        record_cfg = data.setdefault("record", {})
-        previous = record_cfg.get("enable_remux")
-        if isinstance(previous, bool):
-            previous_bool = previous
-        elif isinstance(previous, str):
-            previous_bool = previous.lower() in {"1", "true", "yes", "on"}
-        elif previous is None:
-            previous_bool = True
-        else:
-            previous_bool = bool(previous)
+        # Determine current effective value to avoid unnecessary writes
+        current_cfg = effective_config(ns.config)
+        previous_bool = bool(current_cfg.get("record", {}).get("enable_remux", True))
         if previous_bool == desired and cfg_path.exists():
-            _emit_mode(
-                "encode-mode-unchanged",
-                enabled=desired,
-                config=str(cfg_path),
-            )
+            _emit_mode("encode-mode-unchanged", enabled=desired, config=str(cfg_path))
             sys.exit(0)
 
-        record_cfg["enable_remux"] = desired
-        _write_raw_config(cfg_path, data)
-        _emit_mode(
-            "encode-mode-set",
-            enabled=desired,
-            config=str(cfg_path),
-        )
+        # Edit only the specific key in the TOML, preserving comments
+        _set_enable_remux_in_config(cfg_path, desired)
+        _emit_mode("encode-mode-set", enabled=desired, config=str(cfg_path))
         sys.exit(0)
 
     elif ns.cmd == "poller":
