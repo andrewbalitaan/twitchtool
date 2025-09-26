@@ -154,7 +154,17 @@ def record(opts: RecordOptions) -> int:
     out_dir = abspath(opts.output_dir)
     ensure_dir(out_dir)
     # Write all in-progress artifacts to a temp subdirectory, then move final outputs
-    temp_dir = ensure_dir(out_dir / "temp")
+    # Prefer placing temp under a TwitchTool subfolder if the output dir is a common
+    # parent like Downloads or Videos, to keep things tidy by default.
+    temp_base = out_dir
+    try:
+        base_name = out_dir.name.lower()
+        if base_name in {"downloads", "videos"}:
+            temp_base = ensure_dir(out_dir / "TwitchTool")
+    except Exception:
+        # If any issue determining/creating a subfolder, fall back to out_dir
+        temp_base = out_dir
+    temp_dir = ensure_dir(temp_base / "temp")
     # Low-space warning
     try:
         import shutil

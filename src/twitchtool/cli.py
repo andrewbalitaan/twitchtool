@@ -130,6 +130,27 @@ def _write_raw_config(path: Path, data: Dict[str, Any]) -> None:
     path.write_text(toml_text, encoding="utf-8")
 
 
+_TRUE_STRS = {"1", "true", "yes", "on", "y", "t"}
+_FALSE_STRS = {"0", "false", "no", "off", "n", "f"}
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in _TRUE_STRS:
+            return True
+        if v in _FALSE_STRS:
+            return False
+        return default
+    return bool(value)
+
+
 def _set_enable_remux_in_config_text(text: str, desired: bool) -> tuple[str, bool]:
     """Return (new_text, changed) with only record.enable_remux toggled.
 
@@ -222,7 +243,12 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--retry-delay", type=int, default=None, help="seconds between retries when offline (default: 60)")
     rp.add_argument("--retry-window", type=int, default=None, help="keep trying this many seconds after a cut (default: 900)")
     rp.add_argument("--loglevel", default=None, help="ffmpeg/streamlink loglevel (default: error)")
-    rp.add_argument("--output-dir", type=Path, default=None, help="directory for outputs (default: ~/Downloads)")
+    rp.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="directory for outputs (default: ~/Videos/TwitchTool or ~/Downloads/TwitchTool)",
+    )
     rp.add_argument(
         "--queue-dir",
         type=Path,
@@ -450,17 +476,19 @@ def main(argv: list[str] | None = None) -> None:
             output_dir=ns.output_dir or Path(c["paths"]["record_dir"]),
             queue_dir=ns.queue_dir or Path(c["paths"]["queue_dir"]),
             enable_remux=(
-                c["record"].get("enable_remux", True)
+                _coerce_bool(c["record"].get("enable_remux", True), True)
                 if ns.enable_remux is None
                 else bool(ns.enable_remux)
             ),
             delete_ts_after_remux=(
-                c["record"]["delete_ts_after_remux"] if ns.delete_ts_after_remux is None else ns.delete_ts_after_remux
+                _coerce_bool(c["record"].get("delete_ts_after_remux", True), True)
+                if ns.delete_ts_after_remux is None
+                else bool(ns.delete_ts_after_remux)
             ),
             delete_input_on_success=(
-                c["record"]["delete_input_on_success"]
+                _coerce_bool(c["record"].get("delete_input_on_success", False), False)
                 if ns.delete_input_on_success is None
-                else ns.delete_input_on_success
+                else bool(ns.delete_input_on_success)
             ),
             record_limit=ns.record_limit or c["limits"]["record_limit"],
             fail_fast=bool(ns.fail_fast),
@@ -562,14 +590,16 @@ def main(argv: list[str] | None = None) -> None:
 
         if ns.encode_mode_cmd == "status":
             current_cfg = effective_config(ns.config)
-            enabled = bool(current_cfg.get("record", {}).get("enable_remux", True))
+            enabled = _coerce_bool(current_cfg.get("record", {}).get("enable_remux", True), True)
             _emit_mode("encode-mode-status", enabled=enabled)
             sys.exit(0)
 
         desired = True if ns.encode_mode_cmd == "on" else False
-        # Determine current effective value to avoid unnecessary writes
-        current_cfg = effective_config(ns.config)
-        previous_bool = bool(current_cfg.get("record", {}).get("enable_remux", True))
+        # Determine current value from file to avoid env-masked surprises
+        data = _load_raw_config(cfg_path)
+        record_cfg = data.get("record", {}) if isinstance(data, dict) else {}
+        previous_val = record_cfg.get("enable_remux")
+        previous_bool = _coerce_bool(previous_val, True)
         if previous_bool == desired and cfg_path.exists():
             _emit_mode("encode-mode-unchanged", enabled=desired, config=str(cfg_path))
             sys.exit(0)
@@ -828,7 +858,7 @@ def main(argv: list[str] | None = None) -> None:
         threads = ns.threads or c["encode_daemon"]["threads"]
         loglevel = ns.loglevel or c["encode_daemon"]["loglevel"]
         delete_input_on_success = (
-            c["record"]["delete_input_on_success"]
+            _coerce_bool(c["record"].get("delete_input_on_success", False), False)
             if ns.delete_input_on_success is None
             else bool(ns.delete_input_on_success)
         )

@@ -15,8 +15,8 @@ Targets a single‑vCPU VPS. No heavy deps—pure stdlib + `tomli` for Python 3.
 
 ## What’s new in 0.1.1
 
-- **Default recordings directory** changed to `~/Downloads`.
-- **x265 scale fix:** encoder uses `scale=-2:480` (instead of `-1:480`) to guarantee an even width (e.g., 854×480), preventing libx265 alignment errors.
+- Default recordings directory now prefers `~/Videos/TwitchTool` if `~/Videos` exists, otherwise `~/Downloads/TwitchTool`.
+- x265 scale fix: encoder uses `scale=-2:480` (instead of `-1:480`) to guarantee an even width (e.g., 854×480), preventing libx265 alignment errors.
 
 ---
 
@@ -229,7 +229,7 @@ twitchtool doctor
 
 ### In-progress temp directory
 
-- While recording, all in-progress files live under a `temp/` subfolder inside your configured recordings folder (e.g., `~/Downloads/TwitchTool/temp`).
+- While recording, all in-progress files live under a `temp/` subfolder inside your configured recordings folder (e.g., `~/Downloads/TwitchTool/temp`). If you point `--output-dir` to a common parent like `~/Downloads` or `~/Videos`, twitchtool will place temp under a `TwitchTool/temp` subfolder (e.g., `~/Downloads/TwitchTool/temp`) to keep things tidy.
 - Final deliverables are moved atomically into the recordings folder once ready:
   - Remux disabled/failed: the merged `<base>.ts` is moved to `<output_dir>`.
   - Remux succeeded: the `<base>.mp4` (and, if configured to keep it, `<base>.ts`) is moved to `<output_dir>`.
@@ -498,10 +498,12 @@ ffmpeg -i input -vf "scale=-2:480" -r 30 -c:v libx265 -crf 26 -preset medium -th
 ## Commands
 
 - `twitchtool record <username> [--quality best] [--retry-delay 60] [--retry-window 900] [--loglevel error] [--output-dir DIR] [--queue-dir DIR] [--record-limit 6] [--delete-ts-after-remux|--no-delete-ts-after-remux] [--delete-input-on-success|--no-delete-input-on-success] [--fail-fast]`
+  - `--output-dir` default: `~/Videos/TwitchTool` if `~/Videos` exists, else `~/Downloads/TwitchTool`.
 - `twitchtool encode-daemon run [--queue-dir DIR] [--preset medium] [--crf 26] [--threads 1] [--height 480] [--fps auto] [--loglevel error] [--record-limit 6]`
 - `twitchtool encode-daemon stop [--timeout 10] [--force]`
 - `twitchtool encode-daemon status`
 - `twitchtool tscompress [--height 480] [--fps auto] [--crf 26] [--preset medium] [--threads 1] [--loglevel error] [--delete-ts-after-remux] [--overwrite] [--delete-input-on-success] <.ts ...>`
+  - `--fps` default: taken from config (`[encode_daemon].fps`), where `"auto"` preserves source FPS; pass a number or fraction like `30000/1001` to override.
 - `twitchtool encode-mode on|off|status`
 - `twitchtool help [command]`
 - `twitchtool poller run [--users-file ~/.config/twitchtool/users.txt] [--interval 300] [--quality best] [--download-cmd 'twitchtool record'] [--timeout 15] [--probe-concurrency 10] [--record-limit 6] [--logs-dir DIR]`
