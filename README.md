@@ -376,6 +376,14 @@ systemctl --user enable --now twitch-encoderd.service
 systemctl --user enable --now twitch-poller.service
 ```
 
+To keep the poller and encoder running after you log out or the host reboots, enable linger for your user (run once):
+
+```bash
+loginctl enable-linger $USER
+```
+
+This setting persists across sessions; without it the user systemd instance, and therefore the poller/encoder services, stop whenever your last login ends.
+
 Logs go to `journalctl --user -u twitch-poller -f` and `--user -u twitch-encoderd -f`.
 - **Service logs (poller/encoder):** `journalctl --user -u twitch-poller.service` / `journalctl --user -u twitch-encoderd.service`.
 - **Total journal size:**
