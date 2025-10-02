@@ -78,6 +78,9 @@ DEFAULTS: Dict[str, Any] = {
         "crf": 26,
         "threads": 1,
         "height": 480,
+        "video_codec": "libx265",
+        "audio_bitrate": "160k",
+        "audio_rate": 48_000,
         # 'auto' preserves source FPS; or set a number/fraction like '30000/1001'
         "fps": "auto",
         "loglevel": "error",
@@ -166,10 +169,14 @@ def apply_env(cfg: Dict[str, Any]) -> Dict[str, Any]:
         ("ENCODER_HEIGHT", "height"),
         ("ENCODER_FPS", "fps"),
         ("ENCODER_LOGLEVEL", "loglevel"),
+        ("ENCODER_VIDEO_CODEC", "video_codec"),
+        ("ENCODER_AUDIO_BITRATE", "audio_bitrate"),
+        ("ENCODER_AUDIO_RATE", "audio_rate"),
+        ("ENCODER_X265_PARAMS", "x265_params"),
     ]:
         v = _env_str(env, None)
         if v is not None:
-            if key in {"crf", "threads", "height"}:
+            if key in {"crf", "threads", "height", "audio_rate"}:
                 try:
                     e[key] = int(v)
                 except ValueError:

@@ -238,7 +238,7 @@ twitchtool doctor
 
 ## Batch remux + compress existing .ts files
 
-If you have existing `.ts` recordings and want to remux and compress them serially without the queue/daemon, use the helper script in this repo:
+If you have existing `.ts` recordings and want to remux and compress them serially without the queue/daemon, use the helper script in this repo (a thin wrapper around `twitchtool tscompress`):
 
 ```bash
 python3 scripts/remux_compress_serial.py ~/Downloads/TwitchTool/*.ts
@@ -253,18 +253,20 @@ twitchtool tscompress ~/Downloads/TwitchTool/*.ts
 Notes:
 - Requires `ffmpeg` in PATH.
 - Processes inputs one-by-one (serial).
-- Produces `<basename>.mp4` (remux) and `<basename>_compressed.mp4` (x265).
-- Keeps the merged `.ts` after a successful remux by default; add `--delete-ts-after-remux` to remove it.
+- Produces `<basename>.mp4` (remux) and `<basename>_compressed.mp4` (libx265 by default).
+- Keeps the merged `.ts` after a successful remux by default; add `--delete-ts-after-remux` or `--delete-source` to remove it.
 - Skips existing outputs unless you pass `--overwrite`.
-- Encoding parameters match the encoder daemon defaults: `scale=-2:HEIGHT`, `fps`, `CRF`, `preset`, `threads`, AAC 128k, `+faststart`.
+- Encoding preserves source timestamps (`-copyts -start_at_zero -enc_time_base demux -fps_mode vfr`) while applying your chosen codec/preset/CRF and AAC audio (default 160k). The MP4 is finalized with `-video_track_timescale 90000` and `+faststart`.
+- Use `--dry-run` to preview the ffmpeg commands without executing them.
 
 Common options:
 
 ```bash
 python3 scripts/remux_compress_serial.py \
-  --height 480 --fps 30 --crf 26 --preset medium --threads 1 \
-  --loglevel error --overwrite --delete-input-on-success --delete-ts-after-remux \
-  /path/to/*.ts
+  --max-height 720 --crf 26 --preset medium --threads 1 \
+  --audio-bitrate 160k --loglevel info --overwrite \
+  --delete-input-on-success --delete-ts-after-remux \
+  ~/Downloads/TwitchTool/*.ts
 ```
 
 ---
@@ -304,7 +306,10 @@ preset = "medium"
 crf = 26
 threads = 1
 height = 480
-fps = 30
+video_codec = "libx265"
+audio_bitrate = "160k"
+audio_rate = 48000
+# fps override is ignored; the encoder preserves source cadence.
 loglevel = "error"
 
 [poller]
@@ -507,11 +512,11 @@ ffmpeg -i input -vf "scale=-2:480" -r 30 -c:v libx265 -crf 26 -preset medium -th
 
 - `twitchtool record <username> [--quality best] [--retry-delay 60] [--retry-window 900] [--loglevel error] [--output-dir DIR] [--queue-dir DIR] [--record-limit 6] [--delete-ts-after-remux|--no-delete-ts-after-remux] [--delete-input-on-success|--no-delete-input-on-success] [--fail-fast]`
   - `--output-dir` default: `~/Videos/TwitchTool` if `~/Videos` exists, else `~/Downloads/TwitchTool`.
-- `twitchtool encode-daemon run [--queue-dir DIR] [--preset medium] [--crf 26] [--threads 1] [--height 480] [--fps auto] [--loglevel error] [--record-limit 6]`
+- `twitchtool encode-daemon run [--queue-dir DIR] [--preset medium] [--crf 26] [--threads 1] [--max-height 480] [--video-codec libx265] [--audio-bitrate 160k] [--audio-rate 48000] [--x265-params ...] [--loglevel error] [--record-limit 6]`
 - `twitchtool encode-daemon stop [--timeout 10] [--force]`
 - `twitchtool encode-daemon status`
-- `twitchtool tscompress [--height 480] [--fps auto] [--crf 26] [--preset medium] [--threads 1] [--loglevel error] [--delete-ts-after-remux] [--overwrite] [--delete-input-on-success] <.ts ...>`
-  - `--fps` default: taken from config (`[encode_daemon].fps`), where `"auto"` preserves source FPS; pass a number or fraction like `30000/1001` to override.
+- `twitchtool tscompress [--max-height 480] [--crf 26] [--preset medium] [--threads 1] [--video-codec libx265] [--audio-bitrate 160k] [--audio-rate 48000] [--x265-params ...] [--loglevel error] [--remux-only] [--dry-run] [--delete-ts-after-remux] [--delete-source] [--overwrite] [--delete-input-on-success] <.ts ...>`
+  - `--fps` is ignored; the encoder always preserves the source cadence (`--fps auto`).
 - `twitchtool encode-mode on|off|status`
 - `twitchtool help [command]`
 - `twitchtool poller run [--users-file ~/.config/twitchtool/users.txt] [--interval 300] [--quality best] [--download-cmd 'twitchtool record'] [--timeout 15] [--probe-concurrency 10] [--record-limit 6] [--logs-dir DIR]`

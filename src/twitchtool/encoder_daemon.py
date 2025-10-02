@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .ffmpeg_cmds import build_encode_cmd
 from .locks import GlobalSlotManager
 from .queue import JobEntry, oldest_job, write_error_for_job
 from .utils import (
@@ -43,6 +44,10 @@ class EncodeOptions:
     # fps: "auto" to preserve source; or a number/fraction like "30000/1001"
     fps: str = "auto"
     loglevel: str = "error"
+    video_codec: str = "libx265"
+    audio_bitrate: str = "160k"
+    audio_rate: int = 48_000
+    x265_params: str | None = None
     json_logs: bool = False
     record_limit: int = 6
     encoder_concurrency: int = 1  # reserved; current implementation: 1
@@ -79,52 +84,23 @@ class SingleInstanceLock:
 
 
 def _build_ffmpeg_cmd(job: JobEntry, opts: EncodeOptions) -> list[str]:
-    ffmpeg = which("ffmpeg") or "ffmpeg"
-    # Build video filtergraph with optional fps= and vsync cfr
-    vf_filters: list[str] = [f"scale=-2:{int(opts.height)}"]
-    vsync: list[str] = []
-    fps_val = str(opts.fps).strip().lower() if opts.fps is not None else "auto"
-    if fps_val and fps_val != "auto":
-        vf_filters.append(f"fps={fps_val}")
-        vsync = ["-vsync", "cfr"]
-
-    # Add +genpts before -i when input is TS to stabilize timestamps
-    in_suffix = Path(job.job.input).suffix.lower()
-    ts_fix = ["-fflags", "+genpts"] if in_suffix == ".ts" else []
-
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-nostdin",
-        "-loglevel",
-        opts.loglevel,
-        "-y",
-        *ts_fix,
-        "-i",
-        job.job.input,
-        "-vf",
-        ",".join(vf_filters),
-        "-c:v",
-        "libx265",
-        "-crf",
-        str(int(opts.crf)),
-        "-preset",
-        str(opts.preset),
-        "-threads",
-        str(int(opts.threads)),
-        *vsync,
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-ar",
-        "48000",
-        "-af",
-        "aresample=async=1:first_pts=0",
-        "-movflags",
-        "+faststart",
-        job.job.output,
-    ]
+    ffmpeg_bin = which("ffmpeg") or "ffmpeg"
+    cmd = build_encode_cmd(
+        ffmpeg_bin,
+        Path(job.job.input),
+        Path(job.job.output),
+        video_codec=opts.video_codec,
+        preset=opts.preset,
+        crf=opts.crf,
+        audio_bitrate=opts.audio_bitrate,
+        audio_rate=opts.audio_rate,
+        max_height=opts.height,
+        threads=opts.threads,
+        loglevel=opts.loglevel,
+        x265_params=opts.x265_params,
+        stats=False,
+        overwrite=True,
+    )
     prefix = build_nice_ionice_prefix()
     return prefix + cmd
 
@@ -298,23 +274,51 @@ def encode_daemon(opts: EncodeOptions) -> int:
     def _clamp(n: int, lo: int, hi: int) -> int:
         return max(lo, min(hi, n))
 
-    original = (opts.crf, opts.threads, opts.height, str(opts.fps))
-    opts.crf = _clamp(int(opts.crf), 0, 51)
-    opts.threads = _clamp(int(opts.threads), 1, 64)
-    opts.height = _clamp(int(opts.height), 144, 4320)
-    # fps may be 'auto' or a fraction; leave as-is
-    if (opts.crf, opts.threads, opts.height, str(opts.fps)) != original:
+    sanitized: dict[str, object] = {}
+
+    new_crf = _clamp(int(opts.crf), 0, 51)
+    if new_crf != opts.crf:
+        opts.crf = new_crf
+        sanitized["crf"] = new_crf
+
+    new_threads = _clamp(int(opts.threads), 1, 64)
+    if new_threads != opts.threads:
+        opts.threads = new_threads
+        sanitized["threads"] = new_threads
+
+    new_height = _clamp(int(opts.height), 144, 4320)
+    if new_height != opts.height:
+        opts.height = new_height
+        sanitized["height"] = new_height
+
+    try:
+        new_audio_rate = int(opts.audio_rate)
+    except (TypeError, ValueError):
+        new_audio_rate = 48_000
+    new_audio_rate = _clamp(new_audio_rate, 8_000, 192_000)
+    if new_audio_rate != opts.audio_rate:
+        opts.audio_rate = new_audio_rate
+        sanitized["audio_rate"] = new_audio_rate
+
+    if not str(opts.audio_bitrate).strip():
+        opts.audio_bitrate = "160k"
+        sanitized["audio_bitrate"] = opts.audio_bitrate
+
+    if not str(opts.video_codec).strip():
+        opts.video_codec = "libx265"
+        sanitized["video_codec"] = opts.video_codec
+
+    fps_clean = str(opts.fps).strip().lower() if opts.fps is not None else "auto"
+    if fps_clean and fps_clean != "auto":
+        sanitized["fps"] = "auto"
         logger.warning(
-            "sanitized encode options",
-            extra={
-                "extra": {
-                    "crf": opts.crf,
-                    "threads": opts.threads,
-                    "height": opts.height,
-                    "fps": str(opts.fps),
-                }
-            },
+            "ignoring non-auto fps override for encoder; preserving source timestamps",
+            extra={"extra": {"requested_fps": str(opts.fps)}},
         )
+        opts.fps = "auto"
+
+    if sanitized:
+        logger.warning("sanitized encode options", extra={"extra": sanitized})
 
     qdir = abspath(opts.queue_dir)
     ensure_dir(qdir)

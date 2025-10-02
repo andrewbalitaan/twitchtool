@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .ffmpeg_cmds import build_remux_cmd
 from .locks import GlobalSlotManager, PerUserLock, SlotUnavailable, UserAlreadyRecording
 from .config import DEFAULTS
 from .queue import Job, write_job
@@ -111,23 +112,7 @@ def _ffmpeg_concat(parts: list[Path], out_ts: Path, loglevel: str) -> int:
 
 def _ffmpeg_remux_to_mp4(in_ts: Path, out_mp4: Path, loglevel: str) -> int:
     ffmpeg = which("ffmpeg") or "ffmpeg"
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-nostdin",
-        "-i",
-        str(in_ts),
-        "-c",
-        "copy",
-        "-bsf:a",
-        "aac_adtstoasc",
-        "-movflags",
-        "+faststart",
-        "-loglevel",
-        loglevel,
-        "-y",
-        str(out_mp4),
-    ]
+    cmd = build_remux_cmd(ffmpeg, in_ts, out_mp4, loglevel=loglevel, stats=False, overwrite=True)
     proc = subprocess.Popen(cmd)
     return proc.wait()
 

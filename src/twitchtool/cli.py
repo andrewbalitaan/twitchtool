@@ -4,6 +4,8 @@ import argparse
 import asyncio
 import json
 import os
+import shlex
+import subprocess
 import signal
 import sys
 import time
@@ -26,10 +28,17 @@ from .encoder_daemon import (
     encoder_runtime_state,
     stop_encoder_daemon,
 )
+from .ffmpeg_cmds import (
+    FfmpegNotFound,
+    build_encode_cmd,
+    build_remux_cmd,
+    normalize_inputs,
+    resolve_ffmpeg,
+)
 from .locks import GlobalSlotManager
 from .poller import PollerOptions, poller, poller_runtime_state, stop_poller_daemon
 from .recorder import RecordOptions, record
-from .utils import abspath, is_process_alive
+from .utils import abspath, build_nice_ionice_prefix, is_process_alive
 from .status import gather_status, print_report
 from .users_cli import add_users, list_users, remove_users
 
@@ -324,13 +333,13 @@ def build_parser() -> argparse.ArgumentParser:
     enc_run.add_argument("--preset", default=None)
     enc_run.add_argument("--crf", type=int, default=None)
     enc_run.add_argument("--threads", type=int, default=None)
-    enc_run.add_argument("--height", type=int, default=None)
-    enc_run.add_argument(
-        "--fps",
-        type=str,
-        default=None,
-        help="Output FPS: 'auto' to preserve; or a number/fraction like 30000/1001",
-    )
+    enc_run.add_argument("--video-codec", choices=["libx265", "libx264"], default=None)
+    enc_run.add_argument("--audio-bitrate", default=None)
+    enc_run.add_argument("--audio-rate", type=int, default=None)
+    enc_run.add_argument("--max-height", dest="height", type=int, default=None)
+    enc_run.add_argument("--height", dest="height", type=int, default=None, help=argparse.SUPPRESS)
+    enc_run.add_argument("--x265-params", default=None)
+    enc_run.add_argument("--fps", type=str, default=None, help=argparse.SUPPRESS)
     enc_run.add_argument("--loglevel", default=None)
     enc_run.add_argument("--record-limit", type=int, default=None, help="record limit used to detect downloads (default: 6)")
 
@@ -387,27 +396,42 @@ def build_parser() -> argparse.ArgumentParser:
     # tscompress (batch remux + encode for existing .ts files)
     tc = sub.add_parser("tscompress", help="remux and compress .ts files serially")
     _add_common_flags(tc)
-    tc.add_argument("inputs", nargs="+", help="one or more .ts file paths or globs")
-    tc.add_argument("--height", type=int, default=None)
+    tc.add_argument("inputs", nargs="+", help="one or more .ts file paths, globs, or directories")
+    tc.add_argument("--output-dir", type=Path, default=None, help="write outputs to this directory")
+    tc.add_argument("--suffix", default="_compressed", help="suffix appended before .mp4 (default: %(default)s)")
+    tc.add_argument("--ffmpeg", default=None, help="ffmpeg binary to invoke (default: use PATH)")
     tc.add_argument(
-        "--fps",
-        type=str,
+        "--video-codec",
+        choices=["libx265", "libx264"],
         default=None,
-        help="Output FPS: 'auto' to preserve; or a number/fraction like 30000/1001",
+        help="video codec to use (default: libx265)",
     )
-    tc.add_argument("--crf", type=int, default=None)
-    tc.add_argument("--preset", default=None)
-    tc.add_argument("--threads", type=int, default=None)
-    tc.add_argument("--loglevel", default=None)
-    tc.add_argument("--keep-ts", action="store_true", default=None, help="keep .ts after successful remux (default)")
-    tc.add_argument("--delete-ts-after-remux", action="store_true", help="delete .ts after successful remux")
+    tc.add_argument("--preset", default=None, help="encoder preset (default: config or medium)")
+    tc.add_argument("--crf", type=int, default=None, help="CRF target (default: config or 26)")
+    tc.add_argument("--audio-bitrate", default=None, help="AAC bitrate, e.g. 160k")
+    tc.add_argument("--audio-rate", type=int, default=None, help="AAC sample rate (default: 48000)")
+    tc.add_argument("--threads", type=int, default=None, help="encoder threads (default: config or 1)")
+    tc.add_argument("--max-height", dest="height", type=int, default=None, help="maximum output height; input is never upscaled")
+    tc.add_argument("--height", dest="height", type=int, default=None, help=argparse.SUPPRESS)
+    tc.add_argument("--x265-params", default=None, help="extra libx265 params (ignored for libx264)")
+    tc.add_argument("--remux-only", action="store_true", help="only perform timestamp-preserving remux; skip encode")
+    tc.add_argument("--loglevel", default=None, help="ffmpeg loglevel (default: config or info)")
     tc.add_argument("--overwrite", action="store_true", help="overwrite existing outputs if present")
+    tc.add_argument("--dry-run", action="store_true", help="print commands without running them")
+    tc.add_argument("--keep-ts", action="store_true", default=None, help="keep .ts after remux (default)")
+    tc.add_argument("--delete-ts-after-remux", action="store_true", help="delete .ts after successful remux")
     tc.add_argument(
         "--delete-input-on-success",
         action="store_true",
         default=None,
-        help="delete the input used for encode after success",
+        help="delete the encoded-from input after success",
     )
+    tc.add_argument(
+        "--delete-source",
+        action="store_true",
+        help="remove the original .ts after successful remux/encode if outputs look healthy",
+    )
+    tc.add_argument("--fps", type=str, default=None, help=argparse.SUPPRESS)
 
     # doctor
     dp = sub.add_parser("doctor", help="check environment")
@@ -517,14 +541,25 @@ def main(argv: list[str] | None = None) -> None:
         enc_cmd = ns.enc_cmd or "run"
 
         if enc_cmd == "run":
+            encode_cfg = c.get("encode_daemon", {})
+            video_codec = ns.video_codec or encode_cfg.get("video_codec", "libx265")
+            audio_bitrate = ns.audio_bitrate or encode_cfg.get("audio_bitrate", "160k")
+            try:
+                audio_rate_opt = int(ns.audio_rate or encode_cfg.get("audio_rate", 48_000))
+            except (TypeError, ValueError):
+                audio_rate_opt = 48_000
             opts = EncodeOptions(
                 queue_dir=ns.queue_dir or Path(c["paths"]["queue_dir"]),
-                preset=ns.preset or c["encode_daemon"]["preset"],
-                crf=ns.crf or c["encode_daemon"]["crf"],
-                threads=ns.threads or c["encode_daemon"]["threads"],
-                height=ns.height or c["encode_daemon"]["height"],
-                fps=str(ns.fps or c["encode_daemon"]["fps"]).strip() or "auto",
-                loglevel=ns.loglevel or c["encode_daemon"]["loglevel"],
+                preset=ns.preset or encode_cfg.get("preset", "medium"),
+                crf=ns.crf or encode_cfg.get("crf", 26),
+                threads=ns.threads or encode_cfg.get("threads", 1),
+                height=ns.height or encode_cfg.get("height", 480),
+                fps=str(ns.fps or encode_cfg.get("fps", "auto")).strip() or "auto",
+                loglevel=ns.loglevel or encode_cfg.get("loglevel", "error"),
+                video_codec=video_codec,
+                audio_bitrate=audio_bitrate,
+                audio_rate=audio_rate_opt,
+                x265_params=ns.x265_params or encode_cfg.get("x265_params"),
                 json_logs=bool(ns.json_logs),
                 record_limit=ns.record_limit or c["limits"]["record_limit"],
                 disk_free_min_bytes=int(c.get("storage", {}).get("disk_free_min_bytes", 10 * 1024 * 1024 * 1024)),
@@ -850,192 +885,213 @@ def main(argv: list[str] | None = None) -> None:
                 else:
                     print(event)
 
-        # Resolve defaults from config
-        height = ns.height or c["encode_daemon"]["height"]
-        fps = (ns.fps if getattr(ns, "fps", None) is not None else c["encode_daemon"].get("fps", "auto"))
-        crf = ns.crf or c["encode_daemon"]["crf"]
-        preset = ns.preset or c["encode_daemon"]["preset"]
-        threads = ns.threads or c["encode_daemon"]["threads"]
-        loglevel = ns.loglevel or c["encode_daemon"]["loglevel"]
-        delete_input_on_success = (
-            _coerce_bool(c["record"].get("delete_input_on_success", False), False)
-            if ns.delete_input_on_success is None
-            else bool(ns.delete_input_on_success)
-        )
-        # keep-ts flag maps inversely to delete_ts_after_remux
-        # Default: keep TS by default; allow explicit delete via flag.
-        if getattr(ns, "keep_ts", None):
+        encode_cfg = c.get("encode_daemon", {})
+        record_cfg = c.get("record", {})
+
+        suffix = ns.suffix or "_compressed"
+        max_height_raw = ns.height if ns.height is not None else encode_cfg.get("height", 480)
+        try:
+            max_height = int(max_height_raw) if max_height_raw is not None else None
+        except (TypeError, ValueError):
+            _emit("invalid-height", value=max_height_raw)
+            sys.exit(2)
+
+        preset = ns.preset or encode_cfg.get("preset", "medium")
+        crf_val = int(ns.crf or encode_cfg.get("crf", 26))
+        threads_raw = ns.threads if ns.threads is not None else encode_cfg.get("threads", 1)
+        try:
+            threads_val = int(threads_raw)
+        except (TypeError, ValueError):
+            threads_val = 1
+        loglevel = ns.loglevel or encode_cfg.get("loglevel", "info")
+        video_codec = ns.video_codec or encode_cfg.get("video_codec", "libx265")
+        audio_bitrate = ns.audio_bitrate or encode_cfg.get("audio_bitrate", "160k")
+        try:
+            audio_rate_val = int(ns.audio_rate or encode_cfg.get("audio_rate", 48_000))
+        except (TypeError, ValueError):
+            audio_rate_val = 48_000
+        x265_params = ns.x265_params or encode_cfg.get("x265_params")
+        remux_only = bool(ns.remux_only)
+        dry_run = bool(ns.dry_run)
+        delete_source = bool(ns.delete_source)
+        overwrite = bool(ns.overwrite)
+        ffmpeg_binary = ns.ffmpeg or "ffmpeg"
+
+        if ns.keep_ts:
             delete_ts_after_remux = False
-        elif getattr(ns, "delete_ts_after_remux", False):
+        elif ns.delete_ts_after_remux:
             delete_ts_after_remux = True
         else:
             delete_ts_after_remux = False
 
-        from .utils import which, build_nice_ionice_prefix
-        import glob
-        import subprocess
-        from pathlib import Path as _Path
+        if ns.delete_input_on_success is None:
+            delete_input_on_success = _coerce_bool(record_cfg.get("delete_input_on_success", False), False)
+        else:
+            delete_input_on_success = bool(ns.delete_input_on_success)
 
-        if not which("ffmpeg"):
-            _emit("ffmpeg-missing")
+        fps_arg = ns.fps if getattr(ns, "fps", None) is not None else encode_cfg.get("fps", "auto")
+        if fps_arg and str(fps_arg).strip().lower() not in {"", "auto"}:
+            _emit("ignoring-fps", requested=str(fps_arg))
+
+        try:
+            ffmpeg_bin = resolve_ffmpeg(ffmpeg_binary)
+        except FfmpegNotFound:
+            _emit("ffmpeg-missing", binary=ffmpeg_binary)
             sys.exit(2)
 
-        # Expand inputs (support shell-expanded and literal globs)
-        patterns: list[str] = list(getattr(ns, "inputs", []) or [])
-        files: list[_Path] = []
-        for pat in patterns:
-            p = _Path(pat)
-            if p.exists():
-                files.append(p)
-                continue
-            matched = [
-                _Path(x) for x in glob.glob(pat)
-            ]
-            if matched:
-                files.extend(matched)
-            else:
-                _emit("no-match", pattern=pat)
+        global_output_dir: Path | None = None
+        if ns.output_dir:
+            global_output_dir = Path(ns.output_dir).expanduser().resolve()
+            global_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # De-duplicate by real path, keep order
-        seen: set[_Path] = set()
-        ordered: list[_Path] = []
-        for f in files:
-            try:
-                rp = f.resolve()
-            except FileNotFoundError:
-                rp = f
-            if rp not in seen:
-                seen.add(rp)
-                ordered.append(f)
+        patterns = list(getattr(ns, "inputs", []) or [])
+        inputs, unmatched = normalize_inputs(patterns)
+        for pattern in unmatched:
+            _emit("no-match", pattern=pattern)
 
-        if not ordered:
+        if not inputs:
             _emit("no-inputs")
             sys.exit(1)
 
-        def _run(cmd: list[str]) -> int:
-            try:
-                proc = subprocess.Popen(cmd)
-            except OSError as e:
-                _emit("spawn-failed", error=str(e))
-                return 1
-            return proc.wait()
-
         rc_overall = 0
-        for ip in ordered:
-            ip = ip.resolve()
-            if ip.suffix.lower() != ".ts":
-                _emit("skip-non-ts", path=str(ip))
+        prefix = build_nice_ionice_prefix()
+
+        for raw in inputs:
+            try:
+                src = raw.resolve()
+            except FileNotFoundError:
+                src = raw
+
+            if not src.exists():
+                _emit("skip-missing", path=str(src))
+                rc_overall = rc_overall or 1
+                continue
+            if src.suffix.lower() != ".ts":
+                _emit("skip-non-ts", path=str(src))
                 rc_overall = rc_overall or 1
                 continue
 
-            base = ip.with_suffix("").name
-            out_dir = ip.parent
-            remux_mp4 = out_dir / f"{base}.mp4"
-            final_mp4 = out_dir / f"{base}_compressed.mp4"
+            dst_dir = global_output_dir or src.parent
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            remux_mp4 = dst_dir / f"{src.stem}.mp4"
+            final_mp4 = dst_dir / f"{src.stem}{suffix}.mp4"
 
-            _emit("begin", input=str(ip))
+            _emit("begin", input=str(src))
 
-            # Remux
-            do_remux = bool(ns.overwrite) or not (remux_mp4.exists() and remux_mp4.stat().st_size > 0)
-            use_input = ip
-            if do_remux:
-                cmd = [
-                    which("ffmpeg") or "ffmpeg",
-                    "-hide_banner",
-                    "-nostdin",
-                    "-i",
-                    str(ip),
-                    "-c",
-                    "copy",
-                    "-bsf:a",
-                    "aac_adtstoasc",
-                    "-movflags",
-                    "+faststart",
-                    "-loglevel",
-                    str(loglevel),
-                    "-y",
-                    str(remux_mp4),
-                ]
-                _emit("remux-start", cmd=" ".join(cmd))
-                rrc = _run(cmd)
-                if rrc == 0 and remux_mp4.exists() and remux_mp4.stat().st_size > 0:
-                    _emit("remux-ok", output=str(remux_mp4))
-                    use_input = remux_mp4
-                    if delete_ts_after_remux:
-                        try:
-                            ip.unlink()
-                            _emit("ts-deleted", path=str(ip))
-                        except Exception as e:
-                            _emit("ts-delete-failed", path=str(ip), error=str(e))
+            encode_input = src
+
+            need_remux = remux_only or overwrite or not (remux_mp4.exists() and remux_mp4.stat().st_size > 0)
+            if need_remux:
+                remux_cmd = build_remux_cmd(
+                    ffmpeg_bin,
+                    src,
+                    remux_mp4,
+                    loglevel=loglevel,
+                    stats=not ns.json_logs,
+                    overwrite=True,
+                )
+                _emit("remux-start", cmd=shlex.join(remux_cmd))
+                if dry_run:
+                    remux_rc = 0
+                    _emit("remux-dry-run", output=str(remux_mp4))
                 else:
-                    _emit("remux-failed", rc=rrc)
+                    remux_rc = subprocess.run(remux_cmd).returncode
+                if remux_rc == 0 and remux_mp4.exists() and remux_mp4.stat().st_size > 0:
+                    _emit("remux-ok", output=str(remux_mp4))
+                    encode_input = remux_mp4
+                    if delete_ts_after_remux and src.exists():
+                        try:
+                            src.unlink()
+                            _emit("ts-deleted", path=str(src))
+                        except Exception as exc:
+                            _emit("ts-delete-failed", path=str(src), error=str(exc))
+                else:
+                    _emit("remux-failed", rc=remux_rc)
+                    if remux_only:
+                        rc_overall = rc_overall or (remux_rc or 1)
+                        continue
             else:
                 _emit("remux-skip-exists", output=str(remux_mp4))
-                use_input = remux_mp4 if remux_mp4.exists() else ip
+                if remux_mp4.exists():
+                    encode_input = remux_mp4
 
-            # Encode
-            if final_mp4.exists() and final_mp4.stat().st_size > 0 and not bool(ns.overwrite):
+            if remux_only:
+                if delete_source and src.exists() and remux_mp4.exists() and remux_mp4.stat().st_size > 0 and not dry_run:
+                    try:
+                        src.unlink()
+                        _emit("source-deleted", path=str(src))
+                    except Exception as exc:
+                        _emit("source-delete-failed", path=str(src), error=str(exc))
+                continue
+
+            if final_mp4.exists() and final_mp4.stat().st_size > 0 and not overwrite:
                 _emit("encode-skip-exists", output=str(final_mp4))
                 continue
 
-            # Build filters and options
-            vf_filters = [f"scale=-2:{int(height)}"]
-            vsync = []
-            fps_val = str(fps).strip().lower() if fps is not None else "auto"
-            if fps_val and fps_val != "auto":
-                vf_filters.append(f"fps={fps_val}")
-                vsync = ["-vsync", "cfr"]
-
-            ts_fix = ["-fflags", "+genpts"] if str(use_input).lower().endswith(".ts") else []
-            cmd = (
-                build_nice_ionice_prefix()
-                + [
-                    which("ffmpeg") or "ffmpeg",
-                    "-hide_banner",
-                    "-nostdin",
-                    "-loglevel",
-                    str(loglevel),
-                    "-y",
-                    *ts_fix,
-                    "-i",
-                    str(use_input),
-                    "-vf",
-                    ",".join(vf_filters),
-                    "-c:v",
-                    "libx265",
-                    "-crf",
-                    str(int(crf)),
-                    "-preset",
-                    str(preset),
-                    "-threads",
-                    str(int(threads)),
-                    *vsync,
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "128k",
-                    "-ar",
-                    "48000",
-                    "-af",
-                    "aresample=async=1:first_pts=0",
-                    "-movflags",
-                    "+faststart",
-                    str(final_mp4),
-                ]
+            encode_cmd = prefix + build_encode_cmd(
+                ffmpeg_bin,
+                encode_input,
+                final_mp4,
+                video_codec=video_codec,
+                preset=preset,
+                crf=crf_val,
+                audio_bitrate=audio_bitrate,
+                audio_rate=audio_rate_val,
+                max_height=max_height,
+                threads=threads_val if threads_val > 0 else None,
+                loglevel=loglevel,
+                x265_params=x265_params,
+                stats=not ns.json_logs,
+                overwrite=True,
             )
-            _emit("encode-start", cmd=" ".join(cmd))
-            erc = _run(cmd)
-            if erc == 0 and final_mp4.exists() and final_mp4.stat().st_size > 0:
-                _emit("encode-ok", output=str(final_mp4))
-                if delete_input_on_success:
-                    try:
-                        use_input.unlink()
-                        _emit("input-deleted", path=str(use_input))
-                    except Exception as e:
-                        _emit("input-delete-failed", path=str(use_input), error=str(e))
-            else:
-                _emit("encode-failed", rc=erc, input=str(ip))
+            _emit("encode-start", cmd=shlex.join(encode_cmd))
+            if dry_run:
+                _emit("encode-dry-run", output=str(final_mp4))
+                continue
+
+            erc = subprocess.run(encode_cmd).returncode
+            if erc != 0 or not final_mp4.exists() or final_mp4.stat().st_size == 0:
+                _emit("encode-failed", rc=erc, input=str(src))
                 rc_overall = rc_overall or (erc or 1)
+                continue
+
+            _emit("encode-ok", output=str(final_mp4))
+
+            if delete_input_on_success and encode_input.exists():
+                try:
+                    src_size = encode_input.stat().st_size
+                    out_size = final_mp4.stat().st_size
+                except OSError as exc:
+                    _emit("input-delete-failed", path=str(encode_input), error=str(exc))
+                else:
+                    if out_size < src_size * 0.1:
+                        _emit("input-delete-skipped", path=str(encode_input), reason="output-too-small")
+                    elif out_size == 0:
+                        _emit("input-delete-skipped", path=str(encode_input), reason="output-zero-bytes")
+                    else:
+                        try:
+                            encode_input.unlink()
+                            _emit("input-deleted", path=str(encode_input))
+                        except Exception as exc:
+                            _emit("input-delete-failed", path=str(encode_input), error=str(exc))
+
+            if delete_source and src.exists():
+                try:
+                    src_size = src.stat().st_size
+                    out_size = final_mp4.stat().st_size
+                except OSError as exc:
+                    _emit("source-delete-failed", path=str(src), error=str(exc))
+                else:
+                    if out_size == 0:
+                        _emit("source-delete-skipped", path=str(src), reason="output-zero-bytes")
+                    elif not remux_only and out_size < src_size * 0.1:
+                        _emit("source-delete-skipped", path=str(src), reason="output-too-small")
+                    else:
+                        try:
+                            src.unlink()
+                            _emit("source-deleted", path=str(src))
+                        except Exception as exc:
+                            _emit("source-delete-failed", path=str(src), error=str(exc))
 
         sys.exit(rc_overall)
 
